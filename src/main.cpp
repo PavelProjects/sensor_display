@@ -1,16 +1,16 @@
 #include <Arduino.h>
 #include <ArduinoOTA.h>
 #include <LiquidCrystal_I2C.h>
-#include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
-#include "ESP8266WebServer.h"
+#include <SmartThing.h>
 #include <ArduinoJson.h>
 
 #define BUTTON_PIN D7
-#define SSID "PUK"
-#define PASSWORD "donttouch"
-#define SENSOR_IP "192.168.2.107"
-#define SENSOR_URL "http://192.168.2.107/sensors"
+
+#define CONF_SENSOR_IP "snsr"
+
+void addActions();
+void addSensors();
 
 void setupRest();
 void printSensors();
@@ -19,7 +19,6 @@ void fetchSensors();
 enum MODES {
   SENSORS_MODE,
   MY_IP_MODE,
-  SENSOR_IP_MODE,
   INFO_MODE,
   FISRT_MODE = SENSORS_MODE,
   LAST_MODE = INFO_MODE
@@ -32,7 +31,6 @@ struct SENSOR_VALUES {
 
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
-ESP8266WebServer server(80);
 
 int mode = FISRT_MODE;
 bool btnPressed = false;
@@ -42,26 +40,27 @@ long lastUpdate;
 long lastAction;
 
 void setup() {
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-
-  WiFi.begin(SSID, PASSWORD);
-
   lcd.init();
   lcd.backlight();
 
   lcd.clear();
-  lcd.setCursor(3, 0);
-  lcd.printf("Connecting");
+  lcd.setCursor(0, 0);
+  lcd.printf("Initializating...");
   lcd.setCursor(0,1);
 
-  while(WiFi.status() != WL_CONNECTED) {
-    lcd.print(".");
-    delay(1000);
-  }
   setupRest();
+  addActions();
+  addSensors();
+  SmartThing.addConfigEntry(CONF_SENSOR_IP, "Sensor ip for first fetch", "string");
+
+  if (SmartThing.init("meteo_display")) {
+    LOGGER.info("main", "SmartThing successfully initialized");
+  } else {
+    LOGGER.error("main", "Failed to init SmartThing!");
+  }
 
   ArduinoOTA.begin();
-  server.begin();
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
 
   lcd.clear();
   lcd.setCursor(0, 0);
@@ -103,12 +102,6 @@ void loop() {
         lcd.setCursor(0, 1);
         lcd.print(WiFi.localIP());
         break;
-      case SENSOR_IP_MODE:
-        lcd.setCursor(3, 0);
-        lcd.print("Sensor ip:");
-        lcd.setCursor(0, 1);
-        lcd.print(SENSOR_IP);
-        break;
       case INFO_MODE:
         lcd.setCursor(2, 0);
         lcd.print("Last update");
@@ -122,9 +115,20 @@ void loop() {
     needUpdate = false;
   }
 
-  server.handleClient();
+  SmartThing.loop();
   ArduinoOTA.handle();
   delay(200);
+}
+
+void addActions() {
+  // todo enable backlight?
+}
+
+void addSensors() {
+  SmartThing.addSensor("last_update", [&]() {
+    return (millis() - lastUpdate) / 1000;
+  });
+  SmartThing.addDigitalSensor("button", BUTTON_PIN);
 }
 
 int extractSensorValue(JsonDocument doc, const char * name) {
@@ -137,22 +141,36 @@ int extractSensorValue(JsonDocument doc, const char * name) {
 void fetchSensors() {
   lastUpdate = millis();
 
+  String sensorIp = STSettings.getConfig()[CONF_SENSOR_IP];
+  if (sensorIp.isEmpty()) {
+    LOGGER.warning("main", "Empty sensor ip, skipping first fetch");
+    return;
+  }
+
+  String url = "http://" + sensorIp + "/sensors";
+  LOGGER.info("main", "Trying to fetch sensors values from %s", url.c_str());
+
   WiFiClient wifiClient;
   HTTPClient httpClient;
-  httpClient.begin(wifiClient, SENSOR_URL);
+  httpClient.begin(wifiClient, url);
   if (httpClient.GET() !=  200) {
+    LOGGER.error("main", "Faied to fetch sensors values");
     sensorValues.temp = -1;
     sensorValues.hum = -1;
     sensorValues.pressure = -1;
     return;
   }
 
+  String response = httpClient.getString();
+  LOGGER.info("main", "Got response: %s", response.c_str());
   JsonDocument doc;
-  deserializeJson(doc, httpClient.getString());
+  deserializeJson(doc, response);
 
   sensorValues.temp = extractSensorValue(doc, "temperature");
   sensorValues.hum = extractSensorValue(doc, "humidity");
   sensorValues.pressure = extractSensorValue(doc, "pressure");
+
+  LOGGER.info("main", "Got sensors values: temp=%d hum=%d pressure=%d", sensorValues.temp, sensorValues.hum, sensorValues.pressure);
 }
 
 void printSensors() {
@@ -168,28 +186,37 @@ void printSensors() {
 }
 
 void setupRest() {
-  server.on("/temp", HTTP_POST, []() {
-    if (server.hasArg("value")) {
-      sensorValues.temp = atoi(server.arg("value").c_str());
+  RestController.getWebServer()->on("/temp", HTTP_POST, [](AsyncWebServerRequest * request) {
+    if (request->hasArg("value")) {
+      sensorValues.temp = atoi(request->arg("value").c_str());
+      LOGGER.debug("main", "Got new value! temp=%d", sensorValues.temp);
       needUpdate = true;
+      lastUpdate = millis();
+      request->send(200);
+    } else {
+      request->send(400);
     }
-    lastUpdate = millis();
-    server.send(200);
   });
-  server.on("/hum", HTTP_POST, []() {
-    if (server.hasArg("value")) {
-      sensorValues.hum = atoi(server.arg("value").c_str());
+  RestController.getWebServer()->on("/hum", HTTP_POST, [](AsyncWebServerRequest * request) {
+    if (request->hasArg("value")) {
+      sensorValues.hum = atoi(request->arg("value").c_str());
+      LOGGER.debug("main", "Got new value! hum=%d", sensorValues.hum);
       needUpdate = true;
+      lastUpdate = millis();
+      request->send(200);
+    } else {
+      request->send(400);
     }
-    lastUpdate = millis();
-    server.send(200);
   });
-  server.on("/pressure", HTTP_POST, []() {
-    if (server.hasArg("value")) {
-      sensorValues.pressure = atoi(server.arg("value").c_str());
+  RestController.getWebServer()->on("/pressure", HTTP_POST, [](AsyncWebServerRequest * request) {
+    if (request->hasArg("value")) {
+      sensorValues.pressure = atoi(request->arg("value").c_str());
+      LOGGER.debug("main", "Got new value! pressure=%d", sensorValues.pressure);
       needUpdate = true;
+      lastUpdate = millis();
+      request->send(200);
+    } else {
+      request->send(400);
     }
-    lastUpdate = millis();
-    server.send(200);
   });
 }
