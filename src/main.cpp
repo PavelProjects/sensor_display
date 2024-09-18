@@ -132,8 +132,8 @@ void addSensors() {
 }
 
 int extractSensorValue(JsonDocument doc, const char * name) {
-  if (doc.containsKey(name) && doc[name].containsKey("value")) {
-    return doc[name]["value"];
+  if (doc.containsKey(name)) {
+    return doc[name];
   }
   return -1;
 }
