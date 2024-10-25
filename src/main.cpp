@@ -62,6 +62,9 @@ void setup() {
   ArduinoOTA.begin();
   pinMode(BUTTON_PIN, INPUT_PULLUP);
 
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, HIGH);
+
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("Fetching values");
